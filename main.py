@@ -3,9 +3,11 @@ import os
 import re
 import json
 import sqlite3
+import html
 from io import BytesIO
 from datetime import datetime
 
+import reportlab
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -22,6 +24,9 @@ from aiogram.types import (
 )
 
 from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_CENTER
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
@@ -30,11 +35,7 @@ from reportlab.platypus import (
     Spacer,
     Table,
     TableStyle,
-    PageBreak,
 )
-from reportlab.lib import colors
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib.enums import TA_CENTER
 
 
 # ============================================================
@@ -81,7 +82,6 @@ def init_db():
         )
     """)
 
-    # Добавляем статус, если база уже существовала
     cursor.execute("PRAGMA table_info(applications)")
     columns = [row[1] for row in cursor.fetchall()]
 
@@ -131,8 +131,14 @@ def get_application(application_id):
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id, user_id, username, full_name,
-               created_at, data, status
+        SELECT
+            id,
+            user_id,
+            username,
+            full_name,
+            created_at,
+            data,
+            status
         FROM applications
         WHERE id = ?
     """, (application_id,))
@@ -152,7 +158,7 @@ def get_user_applications(user_id):
         FROM applications
         WHERE user_id = ?
         ORDER BY id DESC
-        LIMIT 20
+        LIMIT 30
     """, (user_id,))
 
     rows = cursor.fetchall()
@@ -161,13 +167,18 @@ def get_user_applications(user_id):
     return rows
 
 
-def get_all_applications(limit=50):
+def get_all_applications(limit=100):
     conn = get_connection()
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id, user_id, full_name,
-               created_at, data, status
+        SELECT
+            id,
+            user_id,
+            full_name,
+            created_at,
+            data,
+            status
         FROM applications
         ORDER BY id DESC
         LIMIT ?
@@ -184,8 +195,13 @@ def get_new_applications():
     cursor = conn.cursor()
 
     cursor.execute("""
-        SELECT id, user_id, full_name,
-               created_at, data, status
+        SELECT
+            id,
+            user_id,
+            full_name,
+            created_at,
+            data,
+            status
         FROM applications
         WHERE status = 'new'
         ORDER BY id DESC
@@ -228,7 +244,6 @@ def get_stats():
         result[status] = cursor.fetchone()[0]
 
     conn.close()
-
     return result
 
 
@@ -284,8 +299,10 @@ class AdminSearch(StatesGroup):
 def user_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="🚚 Создать заявку")],
-            [KeyboardButton(text="📋 Мои заявки")]
+            [
+                KeyboardButton(text="🚚 Создать заявку"),
+                KeyboardButton(text="📋 Мои заявки"),
+            ]
         ],
         resize_keyboard=True
     )
@@ -296,15 +313,15 @@ def admin_keyboard():
         keyboard=[
             [
                 KeyboardButton(text="📥 Новые заявки"),
-                KeyboardButton(text="📋 Все заявки")
+                KeyboardButton(text="📋 Все заявки"),
             ],
             [
                 KeyboardButton(text="🔎 Найти заявку"),
-                KeyboardButton(text="📄 Выгрузить PDF")
+                KeyboardButton(text="📄 Выгрузить PDF"),
             ],
             [
                 KeyboardButton(text="📊 Статистика"),
-                KeyboardButton(text="🚚 Создать заявку")
+                KeyboardButton(text="🚚 Создать заявку"),
             ]
         ],
         resize_keyboard=True
@@ -375,18 +392,29 @@ def application_keyboard(application_id):
                 InlineKeyboardButton(
                     text="✅ Выполнена",
                     callback_data=f"status_done_{application_id}"
-                )
+                ),
             ],
             [
                 InlineKeyboardButton(
                     text="❌ Отменена",
                     callback_data=f"status_cancelled_{application_id}"
-                )
-            ],
-            [
+                ),
                 InlineKeyboardButton(
                     text="📄 PDF",
                     callback_data=f"pdf_{application_id}"
+                ),
+            ]
+        ]
+    )
+
+
+def user_application_keyboard(application_id):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"📋 HA-{application_id:06d}",
+                    callback_data=f"userapp_{application_id}"
                 )
             ]
         ]
@@ -394,7 +422,7 @@ def application_keyboard(application_id):
 
 
 # ============================================================
-# ПРОВЕРКА ДАТЫ
+# ДАТЫ
 # ============================================================
 
 def normalize_date(value):
@@ -445,8 +473,12 @@ def normalize_phone(phone):
 
 
 # ============================================================
-# ТЕКСТ ЗАЯВКИ
+# ТЕКСТ ЗАЯВКИ TELEGRAM
 # ============================================================
+
+def safe(value):
+    return html.escape(str(value or "—"))
+
 
 def build_application(data, application_id=None, status=None):
 
@@ -473,7 +505,7 @@ def build_application(data, application_id=None, status=None):
 
     pickup_dates = data.get("pickup_dates", [])
 
-    for i in range(data["pickup_count"]):
+    for i in range(data.get("pickup_count", 0)):
 
         date = (
             pickup_dates[i]
@@ -482,10 +514,10 @@ def build_application(data, application_id=None, status=None):
         )
 
         text += f"📍 <b>Точка забора №{i + 1}</b>\n"
-        text += f"Адрес: {data['pickup_addresses'][i]}\n"
-        text += f"Дата: {date}\n"
-        text += f"Контакт: {data['sender_names'][i]}\n"
-        text += f"Телефон: {data['sender_phones'][i]}\n\n"
+        text += f"Адрес: {safe(data['pickup_addresses'][i])}\n"
+        text += f"Дата: {safe(date)}\n"
+        text += f"Контакт: {safe(data['sender_names'][i])}\n"
+        text += f"Телефон: {safe(data['sender_phones'][i])}\n\n"
 
     text += "━━━━━━━━━━━━━━━━━━\n"
     text += "🏁 <b>ВЫГРУЗКА</b>\n"
@@ -493,7 +525,7 @@ def build_application(data, application_id=None, status=None):
 
     delivery_dates = data.get("delivery_dates", [])
 
-    for i in range(data["delivery_count"]):
+    for i in range(data.get("delivery_count", 0)):
 
         date = (
             delivery_dates[i]
@@ -502,16 +534,16 @@ def build_application(data, application_id=None, status=None):
         )
 
         text += f"🏁 <b>Точка выгрузки №{i + 1}</b>\n"
-        text += f"Адрес: {data['delivery_addresses'][i]}\n"
-        text += f"Дата: {date}\n"
-        text += f"Контакт: {data['receiver_names'][i]}\n"
-        text += f"Телефон: {data['receiver_phones'][i]}\n\n"
+        text += f"Адрес: {safe(data['delivery_addresses'][i])}\n"
+        text += f"Дата: {safe(date)}\n"
+        text += f"Контакт: {safe(data['receiver_names'][i])}\n"
+        text += f"Телефон: {safe(data['receiver_phones'][i])}\n\n"
 
     text += "━━━━━━━━━━━━━━━━━━\n"
     text += "🚚 <b>ПОМЕТКА ВОДИТЕЛЮ</b>\n"
     text += "━━━━━━━━━━━━━━━━━━\n\n"
 
-    text += (data.get("driver_note") or "—")
+    text += safe(data.get("driver_note") or "—")
     text += "\n\n"
 
     text += (
@@ -523,36 +555,137 @@ def build_application(data, application_id=None, status=None):
 
 
 # ============================================================
-# PDF
+# ШРИФТ PDF
 # ============================================================
 
-def get_pdf_font():
+PDF_FONT = "HorizontVera"
+PDF_FONT_BOLD = "HorizontVeraBold"
 
-    possible_fonts = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    ]
 
-    for path in possible_fonts:
-        if os.path.exists(path):
+def register_pdf_fonts():
+    """
+    ReportLab поставляется со шрифтами Vera.
+    Используем их напрямую, поэтому отдельный .ttf
+    в репозиторий загружать не нужно.
+    """
 
-            try:
-                pdfmetrics.registerFont(
-                    TTFont("HorizontFont", path)
-                )
-                return "HorizontFont"
+    reportlab_dir = os.path.dirname(reportlab.__file__)
 
-            except Exception:
-                pass
+    regular_path = os.path.join(
+        reportlab_dir,
+        "fonts",
+        "Vera.ttf"
+    )
 
-    return "Helvetica"
+    bold_path = os.path.join(
+        reportlab_dir,
+        "fonts",
+        "VeraBd.ttf"
+    )
 
+    if not os.path.exists(regular_path):
+        raise FileNotFoundError(
+            f"Не найден встроенный шрифт ReportLab: {regular_path}"
+        )
+
+    if not os.path.exists(bold_path):
+        raise FileNotFoundError(
+            f"Не найден встроенный шрифт ReportLab: {bold_path}"
+        )
+
+    registered = pdfmetrics.getRegisteredFontNames()
+
+    if PDF_FONT not in registered:
+        pdfmetrics.registerFont(
+            TTFont(PDF_FONT, regular_path)
+        )
+
+    if PDF_FONT_BOLD not in registered:
+        pdfmetrics.registerFont(
+            TTFont(PDF_FONT_BOLD, bold_path)
+        )
+
+    pdfmetrics.registerFontFamily(
+        PDF_FONT,
+        normal=PDF_FONT,
+        bold=PDF_FONT_BOLD,
+        italic=PDF_FONT,
+        boldItalic=PDF_FONT_BOLD
+    )
+
+
+# ============================================================
+# PDF СТИЛИ
+# ============================================================
+
+def pdf_styles():
+
+    register_pdf_fonts()
+
+    title = ParagraphStyle(
+        "HorizontTitle",
+        fontName=PDF_FONT_BOLD,
+        fontSize=21,
+        leading=25,
+        alignment=TA_CENTER,
+        spaceAfter=4
+    )
+
+    subtitle = ParagraphStyle(
+        "HorizontSubtitle",
+        fontName=PDF_FONT_BOLD,
+        fontSize=13,
+        leading=18,
+        alignment=TA_CENTER,
+        spaceAfter=18
+    )
+
+    section = ParagraphStyle(
+        "HorizontSection",
+        fontName=PDF_FONT_BOLD,
+        fontSize=12,
+        leading=16,
+        spaceBefore=12,
+        spaceAfter=8
+    )
+
+    normal = ParagraphStyle(
+        "HorizontNormal",
+        fontName=PDF_FONT,
+        fontSize=9.5,
+        leading=14
+    )
+
+    bold = ParagraphStyle(
+        "HorizontBold",
+        fontName=PDF_FONT_BOLD,
+        fontSize=9.5,
+        leading=14
+    )
+
+    footer = ParagraphStyle(
+        "HorizontFooter",
+        fontName=PDF_FONT,
+        fontSize=7.5,
+        leading=10,
+        alignment=TA_CENTER
+    )
+
+    return title, subtitle, section, normal, bold, footer
+
+
+def pdf_text(value):
+    return html.escape(str(value or "—"))
+
+
+# ============================================================
+# PDF ОДНОЙ ЗАЯВКИ
+# ============================================================
 
 def create_application_pdf(row):
 
     application_id = row[0]
-    full_name = row[3]
+    full_name = row[3] or "—"
     created_at = row[4]
     data = json.loads(row[5])
     status = row[6]
@@ -562,178 +695,293 @@ def create_application_pdf(row):
     doc = SimpleDocTemplate(
         buffer,
         pagesize=A4,
-        rightMargin=35,
-        leftMargin=35,
+        rightMargin=40,
+        leftMargin=40,
         topMargin=35,
-        bottomMargin=35
+        bottomMargin=35,
+        title=f"Horizont Auto HA-{application_id:06d}"
     )
 
-    font = get_pdf_font()
-
-    styles = getSampleStyleSheet()
-
-    title_style = ParagraphStyle(
-        "TitleRU",
-        parent=styles["Title"],
-        fontName=font,
-        fontSize=18,
-        alignment=TA_CENTER,
-        spaceAfter=16
-    )
-
-    normal = ParagraphStyle(
-        "NormalRU",
-        parent=styles["Normal"],
-        fontName=font,
-        fontSize=10,
-        leading=14
-    )
-
-    heading = ParagraphStyle(
-        "HeadingRU",
-        parent=normal,
-        fontSize=13,
-        spaceBefore=12,
-        spaceAfter=8
-    )
+    (
+        title_style,
+        subtitle_style,
+        section_style,
+        normal_style,
+        bold_style,
+        footer_style
+    ) = pdf_styles()
 
     story = []
 
+    # ШАПКА
+
     story.append(
         Paragraph(
-            f"HORIZONT AUTO — Заявка HA-{application_id:06d}",
+            "HORIZONT AUTO",
             title_style
         )
     )
 
     story.append(
         Paragraph(
-            f"Статус: {status_text(status)}",
-            normal
+            f"ЗАЯВКА HA-{application_id:06d}",
+            subtitle_style
         )
     )
+
+    info_rows = [
+        [
+            Paragraph("Дата создания", bold_style),
+            Paragraph(pdf_text(created_at), normal_style)
+        ],
+        [
+            Paragraph("Статус", bold_style),
+            Paragraph(pdf_text(status_text(status)), normal_style)
+        ],
+        [
+            Paragraph("Заказчик", bold_style),
+            Paragraph(pdf_text(full_name), normal_style)
+        ],
+    ]
+
+    info_table = Table(
+        info_rows,
+        colWidths=[125, 350]
+    )
+
+    info_table.setStyle(
+        TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+            ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 7),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
+        ])
+    )
+
+    story.append(info_table)
+    story.append(Spacer(1, 16))
+
+    # ЗАБОР
 
     story.append(
         Paragraph(
-            f"Создана: {created_at}",
-            normal
+            "ЗАБОР ГРУЗА",
+            section_style
         )
-    )
-
-    story.append(
-        Paragraph(
-            f"Заказчик: {full_name or '—'}",
-            normal
-        )
-    )
-
-    story.append(Spacer(1, 12))
-
-    story.append(
-        Paragraph("ЗАБОР ГРУЗА", heading)
     )
 
     pickup_dates = data.get("pickup_dates", [])
 
-    for i in range(data["pickup_count"]):
+    for i in range(data.get("pickup_count", 0)):
 
-        date = (
+        pickup_date = (
             pickup_dates[i]
             if i < len(pickup_dates)
             else "—"
         )
 
         rows = [
-            ["Точка", f"Забор №{i + 1}"],
-            ["Адрес", data["pickup_addresses"][i]],
-            ["Дата", date],
-            ["Контакт", data["sender_names"][i]],
-            ["Телефон", data["sender_phones"][i]],
+            [
+                Paragraph(
+                    f"Точка забора №{i + 1}",
+                    bold_style
+                ),
+                ""
+            ],
+            [
+                Paragraph("Адрес", bold_style),
+                Paragraph(
+                    pdf_text(data["pickup_addresses"][i]),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Дата забора", bold_style),
+                Paragraph(
+                    pdf_text(pickup_date),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Контакт", bold_style),
+                Paragraph(
+                    pdf_text(data["sender_names"][i]),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Телефон", bold_style),
+                Paragraph(
+                    pdf_text(data["sender_phones"][i]),
+                    normal_style
+                )
+            ],
         ]
 
         table = Table(
             rows,
-            colWidths=[90, 410]
+            colWidths=[125, 350],
+            repeatRows=1
         )
 
         table.setStyle(
             TableStyle([
-                ("FONTNAME", (0, 0), (-1, -1), font),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("SPAN", (0, 0), (1, 0)),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("INNERGRID", (0, 1), (-1, -1), 0.25, colors.lightgrey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ])
         )
 
         story.append(table)
         story.append(Spacer(1, 10))
 
+    # ВЫГРУЗКА
+
     story.append(
-        Paragraph("ВЫГРУЗКА", heading)
+        Paragraph(
+            "ВЫГРУЗКА",
+            section_style
+        )
     )
 
     delivery_dates = data.get("delivery_dates", [])
 
-    for i in range(data["delivery_count"]):
+    for i in range(data.get("delivery_count", 0)):
 
-        date = (
+        delivery_date = (
             delivery_dates[i]
             if i < len(delivery_dates)
             else "—"
         )
 
         rows = [
-            ["Точка", f"Выгрузка №{i + 1}"],
-            ["Адрес", data["delivery_addresses"][i]],
-            ["Дата", date],
-            ["Контакт", data["receiver_names"][i]],
-            ["Телефон", data["receiver_phones"][i]],
+            [
+                Paragraph(
+                    f"Точка выгрузки №{i + 1}",
+                    bold_style
+                ),
+                ""
+            ],
+            [
+                Paragraph("Адрес", bold_style),
+                Paragraph(
+                    pdf_text(data["delivery_addresses"][i]),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Дата выгрузки", bold_style),
+                Paragraph(
+                    pdf_text(delivery_date),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Контакт", bold_style),
+                Paragraph(
+                    pdf_text(data["receiver_names"][i]),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Телефон", bold_style),
+                Paragraph(
+                    pdf_text(data["receiver_phones"][i]),
+                    normal_style
+                )
+            ],
         ]
 
         table = Table(
             rows,
-            colWidths=[90, 410]
+            colWidths=[125, 350],
+            repeatRows=1
         )
 
         table.setStyle(
             TableStyle([
-                ("FONTNAME", (0, 0), (-1, -1), font),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
-                ("GRID", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("SPAN", (0, 0), (1, 0)),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("BACKGROUND", (0, 0), (0, -1), colors.lightgrey),
-                ("LEFTPADDING", (0, 0), (-1, -1), 6),
-                ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-                ("TOPPADDING", (0, 0), (-1, -1), 6),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("INNERGRID", (0, 1), (-1, -1), 0.25, colors.lightgrey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 8),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+                ("TOPPADDING", (0, 0), (-1, -1), 7),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
             ])
         )
 
         story.append(table)
         story.append(Spacer(1, 10))
 
-    story.append(
-        Paragraph("ПОМЕТКА ВОДИТЕЛЮ", heading)
-    )
+    # ПОМЕТКА
 
     story.append(
         Paragraph(
-            data.get("driver_note") or "—",
-            normal
+            "ПОМЕТКА ВОДИТЕЛЮ",
+            section_style
+        )
+    )
+
+    note = data.get("driver_note") or "—"
+
+    note_table = Table(
+        [[Paragraph(pdf_text(note), normal_style)]],
+        colWidths=[475]
+    )
+
+    note_table.setStyle(
+        TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+            ("TOPPADDING", (0, 0), (-1, -1), 10),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ])
+    )
+
+    story.append(note_table)
+
+    # ФАЙЛЫ
+
+    story.append(Spacer(1, 12))
+
+    story.append(
+        Paragraph(
+            f"Приложено файлов: {len(data.get('files', []))}",
+            normal_style
+        )
+    )
+
+    story.append(Spacer(1, 25))
+
+    story.append(
+        Paragraph(
+            "HORIZONT AUTO • Заявка сформирована автоматически",
+            footer_style
         )
     )
 
     doc.build(story)
 
     buffer.seek(0)
-
     return buffer.getvalue()
 
+
+# ============================================================
+# ОБЩИЙ PDF-РЕЕСТР
+# ============================================================
 
 def create_all_pdf():
 
@@ -747,31 +995,31 @@ def create_all_pdf():
         rightMargin=30,
         leftMargin=30,
         topMargin=30,
-        bottomMargin=30
+        bottomMargin=30,
+        title="Horizont Auto — Реестр заявок"
     )
 
-    font = get_pdf_font()
-    styles = getSampleStyleSheet()
-
-    title = ParagraphStyle(
-        "TitleAll",
-        parent=styles["Title"],
-        fontName=font,
-        alignment=TA_CENTER
-    )
-
-    normal = ParagraphStyle(
-        "NormalAll",
-        parent=styles["Normal"],
-        fontName=font,
-        fontSize=9,
-        leading=12
-    )
+    (
+        title_style,
+        subtitle_style,
+        section_style,
+        normal_style,
+        bold_style,
+        footer_style
+    ) = pdf_styles()
 
     story = [
         Paragraph(
-            "HORIZONT AUTO — Реестр заявок",
-            title
+            "HORIZONT AUTO",
+            title_style
+        ),
+        Paragraph(
+            "РЕЕСТР ЗАЯВОК",
+            subtitle_style
+        ),
+        Paragraph(
+            f"Сформирован: {datetime.now().strftime('%d.%m.%Y %H:%M')}",
+            normal_style
         ),
         Spacer(1, 15)
     ]
@@ -781,68 +1029,113 @@ def create_all_pdf():
         story.append(
             Paragraph(
                 "Заявок пока нет.",
-                normal
+                normal_style
             )
         )
 
     for row in applications:
 
         application_id = row[0]
-        full_name = row[2]
+        full_name = row[2] or "—"
         created_at = row[3]
         data = json.loads(row[4])
         status = row[5]
 
-        story.append(
-            Paragraph(
-                f"<b>HA-{application_id:06d}</b> — "
-                f"{status_text(status)}",
-                normal
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"Заказчик: {full_name or '—'}",
-                normal
-            )
-        )
-
-        story.append(
-            Paragraph(
-                f"Создана: {created_at}",
-                normal
-            )
-        )
-
         pickup = ", ".join(
             data.get("pickup_addresses", [])
-        )
+        ) or "—"
 
         delivery = ", ".join(
             data.get("delivery_addresses", [])
+        ) or "—"
+
+        pickup_dates = ", ".join(
+            data.get("pickup_dates", [])
+        ) or "—"
+
+        delivery_dates = ", ".join(
+            data.get("delivery_dates", [])
+        ) or "—"
+
+        rows = [
+            [
+                Paragraph(
+                    f"HA-{application_id:06d}",
+                    bold_style
+                ),
+                Paragraph(
+                    pdf_text(status_text(status)),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Заказчик", bold_style),
+                Paragraph(
+                    pdf_text(full_name),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Создана", bold_style),
+                Paragraph(
+                    pdf_text(created_at),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Забор", bold_style),
+                Paragraph(
+                    pdf_text(pickup),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Дата забора", bold_style),
+                Paragraph(
+                    pdf_text(pickup_dates),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Выгрузка", bold_style),
+                Paragraph(
+                    pdf_text(delivery),
+                    normal_style
+                )
+            ],
+            [
+                Paragraph("Дата выгрузки", bold_style),
+                Paragraph(
+                    pdf_text(delivery_dates),
+                    normal_style
+                )
+            ],
+        ]
+
+        table = Table(
+            rows,
+            colWidths=[120, 390]
         )
 
-        story.append(
-            Paragraph(
-                f"Забор: {pickup}",
-                normal
-            )
+        table.setStyle(
+            TableStyle([
+                ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("BOX", (0, 0), (-1, -1), 0.5, colors.grey),
+                ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
+                ("LEFTPADDING", (0, 0), (-1, -1), 7),
+                ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+                ("TOPPADDING", (0, 0), (-1, -1), 6),
+                ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+            ])
         )
 
-        story.append(
-            Paragraph(
-                f"Выгрузка: {delivery}",
-                normal
-            )
-        )
-
+        story.append(table)
         story.append(Spacer(1, 12))
 
     doc.build(story)
 
     buffer.seek(0)
-
     return buffer.getvalue()
 
 
@@ -896,14 +1189,13 @@ async def cancel(message: Message, state: FSMContext):
 
 
 # ============================================================
-# СОЗДАНИЕ
+# СОЗДАНИЕ ЗАЯВКИ
 # ============================================================
 
 @dp.message(F.text == "🚚 Создать заявку")
 async def create(message: Message, state: FSMContext):
 
     await state.clear()
-
     await state.set_state(Form.pickup_count)
 
     await message.answer(
@@ -1048,7 +1340,6 @@ async def pickup_date(message: Message, state: FSMContext):
             "<code>28.09.2026</code>",
             parse_mode="HTML"
         )
-
         return
 
     data = await state.get_data()
@@ -1073,7 +1364,6 @@ async def pickup_date(message: Message, state: FSMContext):
             f"📅 <b>Дата забора №{index + 1}</b>",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1129,7 +1419,6 @@ async def delivery_address(message: Message, state: FSMContext):
             f"🏁 <b>Адрес выгрузки №{index + 1}</b>",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1167,7 +1456,6 @@ async def delivery_date(message: Message, state: FSMContext):
             "Например: <code>29.09.2026</code>",
             parse_mode="HTML"
         )
-
         return
 
     data = await state.get_data()
@@ -1192,7 +1480,6 @@ async def delivery_date(message: Message, state: FSMContext):
             f"📅 <b>Дата выгрузки №{index + 1}</b>",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1252,7 +1539,6 @@ async def sender_name(message: Message, state: FSMContext):
             f"📍 Точка забора №{index + 1}",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1302,7 +1588,6 @@ async def sender_phone(message: Message, state: FSMContext):
                 "Или нажмите «Пропустить».",
                 parse_mode="HTML"
             )
-
             return
 
         phones.append(phone)
@@ -1321,7 +1606,6 @@ async def sender_phone(message: Message, state: FSMContext):
             f"📍 Точка забора №{index + 1}",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1381,7 +1665,6 @@ async def receiver_name(message: Message, state: FSMContext):
             f"🏁 Точка выгрузки №{index + 1}",
             parse_mode="HTML"
         )
-
         return
 
     await state.update_data(
@@ -1417,7 +1700,6 @@ async def receiver_phone(message: Message, state: FSMContext):
             "Введите <code>+7 999 123-45-67</code>",
             parse_mode="HTML"
         )
-
         return
 
     data = await state.get_data()
@@ -1443,7 +1725,6 @@ async def receiver_phone(message: Message, state: FSMContext):
             f"🏁 Точка выгрузки №{index + 1}",
             parse_mode="HTML"
         )
-
         return
 
     await state.set_state(
@@ -1575,7 +1856,7 @@ async def files_done(message: Message, state: FSMContext):
 
 
 # ============================================================
-# ОТПРАВИТЬ ЗАЯВКУ
+# ПОДТВЕРЖДЕНИЕ
 # ============================================================
 
 @dp.callback_query(F.data == "confirm_send")
@@ -1612,32 +1893,39 @@ async def confirm_send(callback: CallbackQuery, state: FSMContext):
     for file in data.get("files", []):
 
         caption = (
-            f"HORIZONT AUTO\n"
-            f"Заявка HA-{application_id:06d}"
+            "🚛 HORIZONT AUTO\n"
+            f"📋 HA-{application_id:06d}"
         )
 
-        if file["type"] == "document":
+        try:
 
-            await bot.send_document(
-                ADMIN_ID,
-                file["file_id"],
-                caption=caption
-            )
+            if file["type"] == "document":
 
-        else:
+                await bot.send_document(
+                    ADMIN_ID,
+                    file["file_id"],
+                    caption=caption
+                )
 
-            await bot.send_photo(
-                ADMIN_ID,
-                file["file_id"],
-                caption=caption
-            )
+            else:
+
+                await bot.send_photo(
+                    ADMIN_ID,
+                    file["file_id"],
+                    caption=caption
+                )
+
+        except Exception as error:
+            print("FILE SEND ERROR:", error)
 
     await state.clear()
 
     await callback.message.answer(
         "✅ <b>Заявка создана!</b>\n\n"
         f"Номер: <b>HA-{application_id:06d}</b>\n"
-        "Статус: 🔵 Новая",
+        "Статус: 🔵 Новая\n\n"
+        "Заявка сохранена в разделе "
+        "«📋 Мои заявки».",
         reply_markup=main_keyboard(
             callback.from_user.id
         ),
@@ -1676,28 +1964,107 @@ async def my_applications(message: Message):
     if not rows:
 
         await message.answer(
-            "У вас пока нет заявок."
+            "📋 У вас пока нет заявок."
         )
         return
 
-    text = "📋 <b>МОИ ЗАЯВКИ</b>\n\n"
+    await message.answer(
+        "📋 <b>МОИ ЗАЯВКИ</b>\n\n"
+        "Нажмите на заявку, чтобы открыть её:",
+        parse_mode="HTML"
+    )
 
     for row in rows:
 
         application_id = row[0]
         created_at = row[1]
+        data = json.loads(row[2])
         status = row[3]
 
-        text += (
-            f"<b>HA-{application_id:06d}</b>\n"
-            f"{status_text(status)}\n"
-            f"Создана: {created_at}\n\n"
+        pickup_addresses = data.get(
+            "pickup_addresses",
+            []
         )
 
-    await message.answer(
-        text,
+        delivery_addresses = data.get(
+            "delivery_addresses",
+            []
+        )
+
+        pickup = (
+            pickup_addresses[0]
+            if pickup_addresses
+            else "—"
+        )
+
+        delivery = (
+            delivery_addresses[0]
+            if delivery_addresses
+            else "—"
+        )
+
+        text = (
+            f"<b>HA-{application_id:06d}</b>\n"
+            f"{status_text(status)}\n"
+            f"📦 {safe(pickup)}\n"
+            f"🏁 {safe(delivery)}\n"
+            f"🕒 {safe(created_at)}"
+        )
+
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=user_application_keyboard(
+                application_id
+            )
+        )
+
+
+# ============================================================
+# ОТКРЫТЬ СВОЮ ЗАЯВКУ
+# ============================================================
+
+@dp.callback_query(F.data.startswith("userapp_"))
+async def open_user_application(callback: CallbackQuery):
+
+    application_id = int(
+        callback.data.split("_")[1]
+    )
+
+    row = get_application(
+        application_id
+    )
+
+    if not row:
+
+        await callback.answer(
+            "Заявка не найдена.",
+            show_alert=True
+        )
+        return
+
+    if (
+        row[1] != callback.from_user.id
+        and callback.from_user.id != ADMIN_ID
+    ):
+        await callback.answer(
+            "Нет доступа к этой заявке.",
+            show_alert=True
+        )
+        return
+
+    data = json.loads(row[5])
+
+    await callback.message.answer(
+        build_application(
+            data,
+            row[0],
+            row[6]
+        ),
         parse_mode="HTML"
     )
+
+    await callback.answer()
 
 
 # ============================================================
@@ -1719,7 +2086,7 @@ async def admin_new(message: Message):
         )
         return
 
-    for row in rows[:20]:
+    for row in rows[:30]:
 
         application_id = row[0]
         data = json.loads(row[4])
@@ -1748,7 +2115,7 @@ async def admin_all(message: Message):
     if message.from_user.id != ADMIN_ID:
         return
 
-    rows = get_all_applications(20)
+    rows = get_all_applications(30)
 
     if not rows:
 
@@ -1757,21 +2124,27 @@ async def admin_all(message: Message):
         )
         return
 
-    text = "📋 <b>ПОСЛЕДНИЕ ЗАЯВКИ</b>\n\n"
-
     for row in rows:
 
-        text += (
-            f"<b>HA-{row[0]:06d}</b> "
-            f"{status_text(row[5])}\n"
-            f"Заказчик: {row[2] or '—'}\n"
-            f"{row[3]}\n\n"
+        application_id = row[0]
+        full_name = row[2] or "—"
+        created_at = row[3]
+        status = row[5]
+
+        text = (
+            f"📋 <b>HA-{application_id:06d}</b>\n"
+            f"{status_text(status)}\n"
+            f"👤 {safe(full_name)}\n"
+            f"🕒 {safe(created_at)}"
         )
 
-    await message.answer(
-        text,
-        parse_mode="HTML"
-    )
+        await message.answer(
+            text,
+            parse_mode="HTML",
+            reply_markup=application_keyboard(
+                application_id
+            )
+        )
 
 
 # ============================================================
@@ -1789,10 +2162,11 @@ async def search_start(message: Message, state: FSMContext):
     )
 
     await message.answer(
-        "🔎 Введите номер заявки.\n\n"
+        "🔎 <b>Введите номер заявки</b>\n\n"
         "Например:\n"
-        "<code>HA-000015</code>\n"
-        "или просто <code>15</code>",
+        "<code>HA-000015</code>\n\n"
+        "Можно просто:\n"
+        "<code>15</code>",
         parse_mode="HTML"
     )
 
@@ -1812,7 +2186,7 @@ async def search_application(message: Message, state: FSMContext):
     if not digits:
 
         await message.answer(
-            "Не удалось определить номер."
+            "❌ Не удалось определить номер."
         )
         return
 
@@ -1847,7 +2221,7 @@ async def search_application(message: Message, state: FSMContext):
 
 
 # ============================================================
-# СТАТУСЫ
+# ИЗМЕНЕНИЕ СТАТУСА
 # ============================================================
 
 @dp.callback_query(F.data.startswith("status_"))
@@ -1859,14 +2233,24 @@ async def change_status(callback: CallbackQuery):
 
     parts = callback.data.split("_")
 
+    if len(parts) != 3:
+        await callback.answer()
+        return
+
     status = parts[1]
-    application_id = int(parts[2])
+
+    try:
+        application_id = int(parts[2])
+    except ValueError:
+        await callback.answer()
+        return
 
     if status not in {
         "work",
         "done",
         "cancelled"
     }:
+        await callback.answer()
         return
 
     row = get_application(
@@ -1874,6 +2258,7 @@ async def change_status(callback: CallbackQuery):
     )
 
     if not row:
+
         await callback.answer(
             "Заявка не найдена."
         )
@@ -1887,6 +2272,7 @@ async def change_status(callback: CallbackQuery):
     data = json.loads(row[5])
 
     try:
+
         await callback.message.edit_text(
             build_application(
                 data,
@@ -1898,20 +2284,24 @@ async def change_status(callback: CallbackQuery):
                 application_id
             )
         )
-    except Exception:
-        pass
+
+    except Exception as error:
+        print("EDIT STATUS ERROR:", error)
 
     try:
+
         await bot.send_message(
             row[1],
             "🚛 <b>HORIZONT AUTO</b>\n\n"
             f"Статус заявки "
-            f"<b>HA-{application_id:06d}</b> изменён.\n\n"
+            f"<b>HA-{application_id:06d}</b> "
+            "изменён.\n\n"
             f"{status_text(status)}",
             parse_mode="HTML"
         )
-    except Exception:
-        pass
+
+    except Exception as error:
+        print("CLIENT STATUS ERROR:", error)
 
     await callback.answer(
         "Статус изменён"
@@ -1929,9 +2319,15 @@ async def application_pdf(callback: CallbackQuery):
         await callback.answer()
         return
 
-    application_id = int(
-        callback.data.split("_")[1]
-    )
+    try:
+        application_id = int(
+            callback.data.split("_")[1]
+        )
+    except Exception:
+        await callback.answer(
+            "Неверный номер заявки."
+        )
+        return
 
     row = get_application(
         application_id
@@ -1956,6 +2352,7 @@ async def application_pdf(callback: CallbackQuery):
         await callback.message.answer_document(
             file,
             caption=(
+                "🚛 HORIZONT AUTO\n"
                 f"📄 Заявка HA-{application_id:06d}"
             )
         )
@@ -1964,10 +2361,10 @@ async def application_pdf(callback: CallbackQuery):
 
     except Exception as error:
 
-        print("PDF ERROR:", error)
+        print("PDF ERROR:", repr(error))
 
         await callback.answer(
-            "Ошибка создания PDF.",
+            "Ошибка создания PDF. Смотрите лог Bothost.",
             show_alert=True
         )
 
@@ -1993,15 +2390,19 @@ async def export_pdf(message: Message):
 
         await message.answer_document(
             file,
-            caption="📄 Реестр заявок HORIZONT AUTO"
+            caption=(
+                "🚛 HORIZONT AUTO\n"
+                "📄 Реестр заявок"
+            )
         )
 
     except Exception as error:
 
-        print("PDF EXPORT ERROR:", error)
+        print("PDF EXPORT ERROR:", repr(error))
 
         await message.answer(
-            "❌ Не удалось создать PDF."
+            "❌ Не удалось создать PDF.\n"
+            "Посмотрите лог Bothost."
         )
 
 
@@ -2020,10 +2421,10 @@ async def statistics(message: Message):
     await message.answer(
         "📊 <b>СТАТИСТИКА HORIZONT AUTO</b>\n\n"
         f"Всего заявок: <b>{stats['total']}</b>\n\n"
-        f"🔵 Новые: {stats['new']}\n"
-        f"🟡 В работе: {stats['work']}\n"
-        f"✅ Выполнены: {stats['done']}\n"
-        f"❌ Отменены: {stats['cancelled']}",
+        f"🔵 Новые: <b>{stats['new']}</b>\n"
+        f"🟡 В работе: <b>{stats['work']}</b>\n"
+        f"✅ Выполнены: <b>{stats['done']}</b>\n"
+        f"❌ Отменены: <b>{stats['cancelled']}</b>",
         parse_mode="HTML"
     )
 
@@ -2036,7 +2437,13 @@ async def main():
 
     init_db()
 
+    # Проверяем PDF-шрифты сразу при запуске
+    register_pdf_fonts()
+
+    print("================================")
     print("HORIZONT AUTO BOT ЗАПУЩЕН")
+    print("PDF FONT: OK")
+    print("================================")
 
     await bot.delete_webhook(
         drop_pending_updates=True
